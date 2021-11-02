@@ -1,0 +1,178 @@
+## ----------------------------------------------------------------------------
+## ..:: infra-server installation ::..
+## ----------------------------------------------------------------------------
+
+- hosts: k3s-udf-service
+  remote_user: root
+  tasks:
+
+    - name: Set timezone to Europe/Rome
+      timezone:
+        name: Europe/Rome
+
+    - name: Upgrading all packages to the latest version
+      apt:
+        update_cache: yes
+        upgrade: dist
+        
+    - name: Remove resolv.conf link
+      file:
+        path: /etc/resolv.conf
+        state: absent
+
+    - name: Copy resolv.conf file
+      copy:
+        src: resolv.conf
+        dest: /etc/resolv.conf
+
+    - name: setting hostname
+      template:
+        src: hostname.j2
+        dest: /etc/hostname
+
+    - name: Enable rc.local
+      template:
+        src: rc.local.j2
+        dest: /etc/rc.local
+        mode: '0755'
+
+    - name: Executing /etc/rc.local
+      command: /etc/rc.local
+
+    ## Installing Docker CE
+    - name: adding Docker apt-key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: adding Docker's APT repository
+      apt_repository:
+       repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable
+       state: present
+       filename: 'docker-ce'
+
+    - name: installing docker-ce
+      apt:
+        name: docker-ce
+        state: present
+        update_cache: true
+
+    - name: Adding ububtu user to docekr group
+      command: usermod -aG docker ubuntu
+
+    - name: Reboot nginx-plus and wait for it to restart
+      reboot:
+        msg: "Reboot initiated by Ansible"
+        connect_timeout: 5
+        reboot_timeout: 600
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: whoami
+
+    ## ..:: Installing K3s ::..
+    ## ------------------------------------------------------------------------
+
+    - name: Installing -k3s-
+      become: true
+      become_user: ubuntu
+      command: /bin/bash -c 'curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--flannel-backend=none --cluster-cidr=10.243.0.0/16 --disable-network-policy --disable=traefik" sh -'
+      args: 
+         chdir: /home/ubuntu/
+
+    - name: Creating .kube directory for ubuntu
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Creating config-k3s file for ubuntu to access k3s on k3s-udf-service
+      become: true
+      become_user: ubuntu
+      command: /bin/bash -c "sudo cat /etc/rancher/k3s/k3s.yaml > ~/.kube/config"
+
+    - name: Creating config-k3s file for ubuntu to access k3s on k3s-udf-service
+      become: true
+      become_user: ubuntu
+      command: /bin/bash -c "sudo cat /etc/rancher/k3s/k3s.yaml > ~/.kube/config-k3s"
+
+    - name: create .kube directory for user ubuntu on infra-server (Ansible controller)
+      local_action:
+        module: file
+        path: /home/ubuntu/.kube
+        state: directory
+        mode: 0755
+        owner: ubuntu
+
+    - name: copy admin.conf to user's kube config for user ubuntu on infra-server (Ansible controller)
+      fetch:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/ubuntu/.kube/config-k3s
+        flat: yes
+
+    - name: copy k3s-manifests directory to ubuntu home direcotry in infra-server (Ansible controller)
+      fetch:
+        src: k3s-manifests
+        dest: /home/ubuntu
+        flat: yes
+
+    ## Installing CALICO Overlay network 
+    - name: Downloading -Calico- Manifest file
+      get_url:
+        url: https://docs.projectcalico.org/manifests/calico.yaml
+        dest: /home/ubuntu/calico-k3s.yaml
+        mode: '0644'
+
+    - name: Configure Calico to use 10.243.0.0 POD Network - Step 1
+      lineinfile: 
+        dest: /home/ubuntu/calico-k3s.yaml
+        regexp: 'CALICO_IPV4POOL_CIDR' 
+        line: '            - name: CALICO_IPV4POOL_CIDR'
+        backrefs: yes
+
+    - name: Configure Calico to use 10.243.0.0 POD Network - Step 2
+      lineinfile: 
+        dest: /home/ubuntu/calico-k3s.yaml
+        regexp: '192.168.0.0/16' 
+        line: '              value: "10.243.0.0/16"'
+        backrefs: yes
+
+    - name: Apply Calico Overlay Networking Configuration
+      become: true
+      become_user: ubuntu
+      command: /bin/bash -c "export KUBECONFIG=/home/ubuntu/.kube/config-k3s ; kubectl apply -f ~/calico-k3s.yaml"
+
+    ## Configuring CALICO for BGP with BIG-IP
+    - name: Creating /etc/calico directory
+      file:
+        path: /etc/calico
+        state: directory
+
+    - name: Downloading calicoctl executable installation file 
+      get_url:
+        url: https://github.com/projectcalico/calicoctl/releases/download/v3.17.1/calicoctl
+        dest: /usr/local/bin
+        mode: '0755'
+ 
+    - name: Copy calico configuration files  
+      copy:
+        src: k3s-manifests/calico-overlay/{{ item }}
+        dest: /etc/calico/
+      with_items:
+        - calicoctl-k3s.cfg
+        - bgpConfiguration-k3s.yaml
+
+    - name: Copying BIGIP BGP Peer configuration file
+      template:
+        src: bigipPeerConfiguration-k3s.yaml.j2
+        dest: /etc/calico/bigipPeerConfiguration-k3s.yaml
+
+    - name: Configuring Calico BGP on k3s cluster
+      become: yes
+      become_user: ubuntu
+      command: calicoctl create -c /etc/calico/calicoctl-k3s.cfg  -f /etc/calico/bgpConfiguration-k3s.yaml
+
+    - name: Adding BGIP bigip-security as a BGPPeer
+      become: yes
+      become_user: ubuntu
+      command: calicoctl create -c /etc/calico/calicoctl-k3s.cfg -f /etc/calico/bigipPeerConfiguration-k3s.yaml
