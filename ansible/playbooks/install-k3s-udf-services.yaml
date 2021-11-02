@@ -2,7 +2,7 @@
 ## ..:: infra-server installation ::..
 ## ----------------------------------------------------------------------------
 
-- hosts: k3s-udf-service
+- hosts: k3s-udf-services
   remote_user: root
   tasks:
 
@@ -110,12 +110,6 @@
         dest: /home/ubuntu/.kube/config-k3s
         flat: yes
 
-    - name: copy k3s-manifests directory to ubuntu home direcotry in infra-server (Ansible controller)
-      fetch:
-        src: k3s-manifests
-        dest: /home/ubuntu
-        flat: yes
-
     ## Installing CALICO Overlay network 
     - name: Downloading -Calico- Manifest file
       get_url:
@@ -176,3 +170,14 @@
       become: yes
       become_user: ubuntu
       command: calicoctl create -c /etc/calico/calicoctl-k3s.cfg -f /etc/calico/bigipPeerConfiguration-k3s.yaml
+
+- hosts: infra-server
+  remote_user: root
+  tasks:
+
+    - name: Copy k3s-manifests files  
+      copy:
+        src: k3s-manifests
+        dest: /home/ubuntu
+        owner: ubuntu
+        group: ubuntu
